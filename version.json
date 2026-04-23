@@ -1,5 +1,6 @@
 {
   "version": "v2.1",
   "exe_url": "https://raw.githubusercontent.com/zemingzhang/537update/main/releases/download/v2.1/537.exe",
-  "release_notes": "初始版本"
+  "gitee_exe_url": "https://gitee.com/zemingzhang/537update/raw/main/releases/download/v2.1/537.exe",
+  "release_notes": "更新版本"
 }
