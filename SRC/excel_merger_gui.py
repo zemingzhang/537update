@@ -25,7 +25,7 @@ from copy import copy
 
 # ===== 版本与更新配置 =====
 # 当前版本号，需与远端 version.json 中的 version 字段格式一致
-CURRENT_VERSION = "v2.26"
+CURRENT_VERSION = "v2.28"
 
 # ===== 更新源选择（宏） =====
 # 可选值："github" 或 "gitee"
@@ -46,7 +46,7 @@ GITEE_RAW_BASE = f"https://gitee.com/{GITEE_REPO}/raw/master"
 class ExcelMergerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("烟草订单文件合并工具 v2.26 ")
+        self.root.title("烟草订单文件合并工具 v2.28 ")
         self.root.geometry("780x720")
         
         # 设置窗口图标（可选）
@@ -865,6 +865,12 @@ class ExcelMergerApp:
         tk.Label(red_row, text="文件2中不存在的商品（未匹配）",
                  font=("微软雅黑", 9)).pack(side=tk.LEFT)
 
+        yellow_row = tk.Frame(color_frame)
+        yellow_row.pack(anchor=tk.W, pady=2)
+        tk.Label(yellow_row, text="  ", bg="#FFFF00", width=3, height=1).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(yellow_row, text="文件2中订单量 > 0 但文件1中不存在的商品（追加到末尾）",
+                 font=("微软雅黑", 9)).pack(side=tk.LEFT)
+
         none_row = tk.Frame(color_frame)
         none_row.pack(anchor=tk.W, pady=2)
         tk.Label(none_row, text="  ", bg="#f0f0f0", width=3, height=1,
@@ -966,13 +972,17 @@ class ExcelMergerApp:
         try:
             # ── 读取文件2，建立商品→订单量映射 ──────────────────────
             self._p3_log(f"正在读取文件2: {os.path.basename(self.p3_file2_path)}")
-            df2 = pd.read_excel(self.p3_file2_path)
+            df2 = pd.read_excel(self.p3_file2_path, dtype=str)
 
             prod_col2 = next(
                 (c for c in df2.columns if '商品' in str(c)), None)
             qty_col2  = next(
                 (c for c in df2.columns
                  if '订单' in str(c) or '数量' in str(c)), None)
+            box_col2  = next(
+                (c for c in df2.columns if '盒码' in str(c)), None)
+            bar_col2  = next(
+                (c for c in df2.columns if '条码' in str(c)), None)
 
             if prod_col2 is None:
                 raise ValueError("文件2中未找到包含'商品'的列")
@@ -980,8 +990,21 @@ class ExcelMergerApp:
                 raise ValueError("文件2中未找到订单/数量列")
 
             self._p3_log(f"  商品列:「{prod_col2}」 订单量列:「{qty_col2}」")
+            self._p3_log(
+                f"  盒码列:「{box_col2 or '未找到'}」 "
+                f"条码列:「{bar_col2 or '未找到'}」")
+
+            def _clean(v):
+                s = str(v).strip()
+                if s in ('nan', 'NaN', 'None'):
+                    return ''
+                if s.endswith('.0') and s[:-2].isdigit():
+                    s = s[:-2]
+                return s
 
             order_map = {}
+            box_map = {}
+            bar_map = {}
             for _, row in df2.iterrows():
                 name = str(row[prod_col2]).strip()
                 try:
@@ -990,6 +1013,10 @@ class ExcelMergerApp:
                     qty = 0.0
                 if name not in ('nan', 'NaN', ''):
                     order_map[name] = order_map.get(name, 0.0) + qty
+                    if box_col2 is not None and not box_map.get(name):
+                        box_map[name] = _clean(row[box_col2])
+                    if bar_col2 is not None and not bar_map.get(name):
+                        bar_map[name] = _clean(row[bar_col2])
 
             green_set = {k for k, v in order_map.items() if v > 0}
             zero_set  = {k for k, v in order_map.items() if v == 0}
@@ -1055,13 +1082,17 @@ class ExcelMergerApp:
             wb = load_workbook(out_path)
             ws = wb.active
             order_col = ws.max_column + 1
-            total_cols = order_col
+            box_col = order_col + 1
+            bar_col = order_col + 2
+            total_cols = bar_col
 
-            header_cell = ws.cell(row=header_row_idx + 1, column=order_col)
-            header_cell.value = "订单量"
             src_header = ws.cell(row=header_row_idx + 1, column=order_col - 1)
-            if src_header.has_style:
-                header_cell._style = copy(src_header._style)
+            for col, title in ((order_col, "订单量"), (box_col, "盒码"),
+                               (bar_col, "条码")):
+                header_cell = ws.cell(row=header_row_idx + 1, column=col)
+                header_cell.value = title
+                if src_header.has_style:
+                    header_cell._style = copy(src_header._style)
 
             green_fill = PatternFill(start_color="90EE90",
                                      end_color="90EE90", fill_type="solid")
@@ -1074,6 +1105,10 @@ class ExcelMergerApp:
                 if qty == int(qty):
                     qty = int(qty)
                 ws.cell(row=excel_row, column=order_col).value = qty
+                ws.cell(row=excel_row, column=box_col).value = (
+                    box_map.get(name) or None)
+                ws.cell(row=excel_row, column=bar_col).value = (
+                    bar_map.get(name) or None)
                 if name in green_set:
                     fill = green_fill
                     green_count += 1
@@ -1086,17 +1121,48 @@ class ExcelMergerApp:
                 for col in range(1, total_cols + 1):
                     ws.cell(row=excel_row, column=col).fill = fill
 
+            # 文件2中有（订单量>0）但文件1中不存在的商品：追加到末尾，标黄
+            yellow_fill = PatternFill(start_color="FFFF00",
+                                      end_color="FFFF00", fill_type="solid")
+            file1_names = {n for n, _ in product_rows}
+            style_row = product_rows[-1][1] if product_rows else None
+            next_row = ws.max_row + 1
+            yellow_count = 0
+            for name, qty in order_map.items():
+                if name in file1_names or qty <= 0:
+                    continue
+                if qty == int(qty):
+                    qty = int(qty)
+                if style_row is not None:
+                    for col in range(1, total_cols + 1):
+                        src = ws.cell(row=style_row, column=col)
+                        if src.has_style:
+                            ws.cell(row=next_row, column=col)._style = copy(
+                                src._style)
+                ws.cell(row=next_row, column=prod_col_idx + 1).value = name
+                ws.cell(row=next_row, column=order_col).value = qty
+                ws.cell(row=next_row, column=box_col).value = (
+                    box_map.get(name) or None)
+                ws.cell(row=next_row, column=bar_col).value = (
+                    bar_map.get(name) or None)
+                for col in range(1, total_cols + 1):
+                    ws.cell(row=next_row, column=col).fill = yellow_fill
+                next_row += 1
+                yellow_count += 1
+
             wb.save(out_path)
             self._p3_log(f"✅ 已保存至: {out_path}")
             self._p3_log(
                 f"   绿色（匹配）: {green_count} 条，"
                 f"红色（未匹配）: {red_count} 条，"
+                f"黄色（文件1中不存在）: {yellow_count} 条，"
                 f"忽略（订单量=0）: {skip_count} 条")
 
             if messagebox.askyesno(
                 "完成",
                 f"比较完成！\n绿色（匹配）: {green_count} 条\n"
                 f"红色（未匹配）: {red_count} 条\n"
+                f"黄色（文件1中不存在）: {yellow_count} 条\n"
                 f"忽略（订单量=0）: {skip_count} 条\n\n是否打开结果文件？",
                 parent=self.root
             ):
